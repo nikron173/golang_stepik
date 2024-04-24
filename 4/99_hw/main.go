@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 )
 
 type User struct {
@@ -57,7 +58,11 @@ func SortSliceUserField(u *[]User, param string, orderBy string, limit int, offs
 		}
 	default:
 		{
-			return fmt.Errorf("Error sort by field: %s", param)
+			return &ApplicationError{
+				Code:    http.StatusBadRequest,
+				Message: "Error sort by field (Id, Name, Age)",
+				Time:    time.Now(),
+			}
 		}
 	}
 
@@ -76,10 +81,18 @@ func SortSliceUserField(u *[]User, param string, orderBy string, limit int, offs
 		}
 	default:
 		{
-			return fmt.Errorf("Not valid order by parameter (asc/desc)")
+			return &ApplicationError{
+				Code:    http.StatusBadRequest,
+				Message: "Not valid order by parameter (asc/desc)",
+				Time:    time.Now(),
+			}
 		}
 	}
 	//по умолчанию - это убывание
+	if offset >= len(*u) {
+		*u = make([]User, 0)
+		return nil
+	}
 
 	if limit > 0 && limit <= len(*u) && (offset+1) > 0 && (offset+1) <= len(*u) {
 		if limit+offset > len(*u) {
@@ -98,27 +111,49 @@ type Row struct {
 	ListUsers []User `xml:"row"`
 }
 
+type ApplicationError struct {
+	Code    int       `json:"code"`
+	Message string    `json:"message"`
+	Time    time.Time `json:"time"`
+}
+
+func (e *ApplicationError) Error() string {
+	return fmt.Sprintf("code: %d, error: %s, time: %s",
+		e.Code, e.Message, e.Time)
+}
+
 func searchUser(param *Param) ([]User, error) {
 	row := &Row{}
 
 	file, err := os.Open("dataset.xml")
 	if err != nil {
-		return nil, err
+		return nil, &ApplicationError{
+			Code:    http.StatusInternalServerError,
+			Message: "Error internal server",
+			Time:    time.Now(),
+		}
 	}
 
 	defer file.Close()
 	fileContents, err := io.ReadAll(file)
 	if err != nil {
-		return nil, err
+		return nil, &ApplicationError{
+			Code:    http.StatusInternalServerError,
+			Message: "Error internal server",
+			Time:    time.Now(),
+		}
 	}
 
 	if err := xml.Unmarshal(fileContents, row); err != nil {
-		return nil, err
+		return nil, &ApplicationError{
+			Code:    http.StatusInternalServerError,
+			Message: "Error parsing xml to golang objects",
+			Time:    time.Now(),
+		}
 	}
-	// fmt.Println(row.ListUsers)
+
 	findUsers := make([]User, 0)
 
-	// fmt.Printf("%s, %s, %s, %s\n", name, about, orderField, orderBy)
 	if len(param.Query) == 0 {
 		findUsers = append(findUsers, row.ListUsers...)
 	} else {
@@ -138,12 +173,16 @@ func searchUser(param *Param) ([]User, error) {
 }
 
 func SearchServer(w http.ResponseWriter, r *http.Request) {
+	w.Header().Add("Content-type", "application/json")
 	if r.Method != http.MethodGet {
+		http.ErrNotSupported.Error()
 		return
 	}
 	param := new(Param)
 	param.OrderField = "Name"
 	param.OrderBy = "desc"
+
+	var err error
 
 	if query := r.FormValue("query"); query != "" {
 		param.Query = query
@@ -155,23 +194,58 @@ func SearchServer(w http.ResponseWriter, r *http.Request) {
 		param.OrderBy = orderBy
 	}
 	if limitStr := r.FormValue("limit"); limitStr != "" {
-		param.Limit, _ = strconv.Atoi(limitStr)
+		if param.Limit, err = strconv.Atoi(limitStr); err != nil || param.Limit < 0 {
+			appErr := &ApplicationError{
+				Code:    http.StatusBadRequest,
+				Message: "Error parameter limit",
+				Time:    time.Now(),
+			}
+			appErrJson, _ := json.Marshal(appErr)
+			w.WriteHeader(appErr.Code)
+			fmt.Fprintf(w, "%s", appErrJson)
+			return
+		}
 	}
 	if offsetStr := r.FormValue("offset"); offsetStr != "" {
-		param.Offset, _ = strconv.Atoi(offsetStr)
+		if param.Offset, err = strconv.Atoi(offsetStr); err != nil || param.Offset < 0 {
+			appErr := &ApplicationError{
+				Code:    http.StatusBadRequest,
+				Message: "Error parameter offset",
+				Time:    time.Now(),
+			}
+			appErrJson, _ := json.Marshal(appErr)
+			w.WriteHeader(appErr.Code)
+			fmt.Fprintf(w, "%s", appErrJson)
+			return
+		}
 	}
 
 	users, err := searchUser(param)
 	if err != nil {
-		fmt.Fprintf(w, "%s", err)
+		if appErr, ok := err.(*ApplicationError); ok {
+			w.WriteHeader(appErr.Code)
+		} else {
+			w.WriteHeader(http.StatusBadGateway)
+		}
+		errJson, _ := json.Marshal(err)
+		fmt.Fprintf(w, "%s", errJson)
 		return
 	}
+
 	jsonUsers, err := json.Marshal(users)
 	if err != nil {
-		fmt.Fprintf(w, "%s", err)
+		if appErr, ok := err.(*ApplicationError); ok {
+			w.WriteHeader(appErr.Code)
+		} else {
+			w.WriteHeader(http.StatusBadGateway)
+		}
+		errJson, _ := json.Marshal(err)
+		fmt.Fprintf(w, "%s", errJson)
 		return
 	}
-	fmt.Fprintf(w, "%s", string(jsonUsers))
+
+	fmt.Fprintf(w, "%s", jsonUsers)
+
 }
 
 func main() {
