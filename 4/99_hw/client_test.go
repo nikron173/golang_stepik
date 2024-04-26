@@ -5,24 +5,27 @@ import (
 	"encoding/xml"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"os"
+	"reflect"
 	"sort"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 type TestCase struct {
-	Id      string
-	Result  *CheckoutResult
+	Request *SearchRequest
+	Result  *SearchResponse
 	IsError bool
 }
 
-type CheckoutResult struct {
-	Status  int
-	Balance int
-	Err     string
-}
+// type CheckoutResult struct {
+// 	Status  int
+// 	Balance int
+// 	Err     string
+// }
 
 // код писать тут
 func SearchServer(w http.ResponseWriter, r *http.Request) {
@@ -33,7 +36,7 @@ func SearchServer(w http.ResponseWriter, r *http.Request) {
 	}
 	param := new(SearchRequest)
 	param.OrderField = "Name"
-	param.Limit = 10
+	param.Limit = 25
 
 	var err error
 
@@ -46,7 +49,7 @@ func SearchServer(w http.ResponseWriter, r *http.Request) {
 		} else {
 			w.WriteHeader(http.StatusBadRequest)
 			jsonErr, _ := json.Marshal(SearchErrorResponse{
-				Error: "Error parameter order field",
+				Error: "ErrorBadOrderField",
 			})
 			fmt.Fprintf(w, "%s", jsonErr)
 			return
@@ -180,14 +183,15 @@ func SearchServer(w http.ResponseWriter, r *http.Request) {
 
 	}
 
-	response := &SearchResponse{}
+	// response := &SearchResponse{}
 
 	if param.Offset >= len(findUsers) {
 		findUsers = make([]User, 0)
 		w.WriteHeader(http.StatusOK)
-		response.Users = findUsers
-		jsonResponse, _ := json.Marshal(response)
-		fmt.Fprintf(w, "%s", jsonResponse)
+		// response.Users = findUsers
+		jsonFindUsers, _ := json.Marshal(findUsers)
+		// jsonResponse, _ := json.Marshal(response)
+		fmt.Fprintf(w, "%s", jsonFindUsers)
 		return
 	}
 
@@ -196,16 +200,366 @@ func SearchServer(w http.ResponseWriter, r *http.Request) {
 			findUsers = findUsers[param.Offset:]
 		} else {
 			findUsers = findUsers[param.Offset : param.Offset+param.Limit]
-			response.NextPage = true
+			// response.NextPage = true
 		}
 	}
 
-	response.Users = findUsers
+	// response.Users = findUsers
 	w.WriteHeader(http.StatusOK)
-	jsonResponse, _ := json.Marshal(response)
-	fmt.Fprintf(w, "%s", jsonResponse)
+	// jsonResponse, _ := json.Marshal(response)
+	jsonFindUsers, _ := json.Marshal(findUsers)
+	fmt.Fprintf(w, "%s", jsonFindUsers)
+}
+
+func SearchServerErrorToken(w http.ResponseWriter, r *http.Request) {
+	w.Header().Add("Content-type", "application/json")
+	if r.Method != http.MethodGet {
+		http.ErrNotSupported.Error()
+		return
+	}
+
+	_, err := r.Cookie("AccessToken")
+	if err != nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		jsonErr, _ := json.Marshal(SearchErrorResponse{
+			Error: "Bad AccessToken",
+		})
+		fmt.Fprintf(w, "%s", jsonErr)
+		return
+	}
+}
+
+func SearchServerErrorUnpackJson(w http.ResponseWriter, r *http.Request) {
+	w.Header().Add("Content-type", "application/json")
+	if r.Method != http.MethodGet {
+		http.ErrNotSupported.Error()
+		return
+	}
+	w.WriteHeader(http.StatusBadRequest)
+	fmt.Fprintf(w, "{\"%s\":}", "Users")
+}
+
+func SearchServerErrorOkUnpackJson(w http.ResponseWriter, r *http.Request) {
+	w.Header().Add("Content-type", "application/json")
+	if r.Method != http.MethodGet {
+		http.ErrNotSupported.Error()
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+	fmt.Fprintf(w, "{\"%s\":}", "Users")
+}
+
+func SearchServerErrorInternalServer(w http.ResponseWriter, r *http.Request) {
+	w.Header().Add("Content-type", "application/json")
+	if r.Method != http.MethodGet {
+		http.ErrNotSupported.Error()
+		return
+	}
+	w.WriteHeader(http.StatusInternalServerError)
+	jsonErr, _ := json.Marshal(SearchErrorResponse{
+		Error: "SearchServer fatal error",
+	})
+	fmt.Fprintf(w, "%s", jsonErr)
+}
+
+func SearchServerErrorUnknowStatus(w http.ResponseWriter, r *http.Request) {
+	w.Header().Add("Content-type", "application/json")
+	if r.Method != http.MethodGet {
+		http.ErrNotSupported.Error()
+		return
+	}
+	w.WriteHeader(http.StatusBadRequest)
+	jsonErr, _ := json.Marshal(SearchErrorResponse{
+		Error: "Error access database",
+	})
+	fmt.Fprintf(w, "%s", jsonErr)
+}
+
+func SearchServerErrorTimeout(w http.ResponseWriter, r *http.Request) {
+	w.Header().Add("Content-type", "application/json")
+	if r.Method != http.MethodGet {
+		http.ErrNotSupported.Error()
+		return
+	}
+	w.WriteHeader(http.StatusRequestTimeout)
+	time.Sleep(time.Second * 100)
+	return
 }
 
 func TestFindUser(t *testing.T) {
-	cases := []TestCase{}
+	cases := []TestCase{
+		TestCase{
+			Request: &SearchRequest{
+				Limit:  5,
+				Offset: 0,
+			},
+			Result: &SearchResponse{
+				Users:    []User{},
+				NextPage: false,
+			},
+			IsError: false,
+		},
+		TestCase{
+			Request: &SearchRequest{
+				Limit:  -1,
+				Offset: 0,
+			},
+			Result: &SearchResponse{
+				Users:    []User{},
+				NextPage: false,
+			},
+			IsError: false,
+		},
+		TestCase{
+			Request: &SearchRequest{
+				Limit:  10,
+				Offset: 30,
+			},
+			Result: &SearchResponse{
+				Users:    []User{},
+				NextPage: false,
+			},
+			IsError: false,
+		},
+		TestCase{
+			Request: &SearchRequest{
+				Limit: 30,
+			},
+			Result: &SearchResponse{
+				Users:    []User{},
+				NextPage: false,
+			},
+			IsError: false,
+		},
+		TestCase{
+			Request: &SearchRequest{
+				Offset: -1,
+			},
+			Result: &SearchResponse{
+				Users:    []User{},
+				NextPage: false,
+			},
+			IsError: true,
+		},
+		TestCase{
+			Request: &SearchRequest{
+				OrderField: "Kek",
+			},
+			Result: &SearchResponse{
+				Users:    []User{},
+				NextPage: false,
+			},
+			IsError: true,
+		},
+		TestCase{
+			Request: &SearchRequest{
+				OrderField: "Kek",
+			},
+			Result: &SearchResponse{
+				Users:    []User{},
+				NextPage: false,
+			},
+			IsError: true,
+		},
+	}
+
+	ts := httptest.NewServer(http.HandlerFunc(SearchServer))
+
+	for caseNum, item := range cases {
+		c := &SearchClient{
+			AccessToken: "",
+			URL:         ts.URL,
+		}
+
+		result, err := c.FindUsers(*item.Request)
+
+		if err == nil && item.Request.Limit == 30 && !reflect.DeepEqual(25, len(result.Users)) {
+			t.Errorf("[%d] Error test case, not len(testCase) %d with len(result) %d", caseNum, len(item.Result.Users), len(result.Users))
+		}
+
+		if err == nil && item.Request.Limit == 5 && !reflect.DeepEqual(5, len(result.Users)) {
+			t.Errorf("[%d] Error test case, not len(testCase) %d with len(result) %d", caseNum, len(item.Result.Users), len(result.Users))
+		}
+
+		if err == nil && item.IsError {
+			t.Errorf("[%d] Error: %v, %v", caseNum, result, err)
+		}
+	}
+
+	///////Error Token!
+
+	caseOne := &TestCase{
+		Request: &SearchRequest{
+			Limit:  5,
+			Offset: 50,
+		},
+		Result: &SearchResponse{
+			Users:    []User{},
+			NextPage: false,
+		},
+		IsError: true,
+	}
+
+	ts = httptest.NewServer(http.HandlerFunc(SearchServerErrorToken))
+
+	c := &SearchClient{
+		AccessToken: "Kek",
+		URL:         ts.URL,
+	}
+
+	_, err := c.FindUsers(*caseOne.Request)
+
+	if !(err != nil) && caseOne.IsError {
+		t.Errorf("Error AccessToken check")
+	}
+
+	///Unpack with bad request code
+
+	caseOne = &TestCase{
+		Request: &SearchRequest{
+			Limit:  5,
+			Offset: 2,
+		},
+		Result: &SearchResponse{
+			Users:    []User{},
+			NextPage: false,
+		},
+		IsError: true,
+	}
+
+	ts = httptest.NewServer(http.HandlerFunc(SearchServerErrorUnpackJson))
+
+	c = &SearchClient{
+		AccessToken: "Kek",
+		URL:         ts.URL,
+	}
+
+	_, err = c.FindUsers(*caseOne.Request)
+
+	if !(err != nil) && caseOne.IsError {
+		t.Errorf("Error Unpack json check with bad request status code (400)")
+	}
+
+	///Unpack with success status code
+
+	caseOne = &TestCase{
+		Request: &SearchRequest{
+			Limit:  5,
+			Offset: 2,
+		},
+		Result: &SearchResponse{
+			Users:    []User{},
+			NextPage: false,
+		},
+		IsError: true,
+	}
+
+	ts = httptest.NewServer(http.HandlerFunc(SearchServerErrorOkUnpackJson))
+
+	c = &SearchClient{
+		AccessToken: "",
+		URL:         ts.URL,
+	}
+
+	_, err = c.FindUsers(*caseOne.Request)
+
+	if !(err != nil) && caseOne.IsError {
+		t.Errorf("Error Unpack json check with success status code (200)")
+	}
+
+	///Unpack with success status code
+
+	caseOne = &TestCase{
+		Request: &SearchRequest{
+			Limit:  5,
+			Offset: 2,
+		},
+		Result: &SearchResponse{
+			Users:    []User{},
+			NextPage: false,
+		},
+		IsError: true,
+	}
+
+	ts = httptest.NewServer(http.HandlerFunc(SearchServerErrorInternalServer))
+
+	c = &SearchClient{
+		AccessToken: "",
+		URL:         ts.URL,
+	}
+
+	_, err = c.FindUsers(*caseOne.Request)
+
+	if !(err != nil) && caseOne.IsError {
+		t.Errorf("Error SearchServerErrorInternalServer with internal server status code (500)")
+	}
+
+	///SearchServerErrorUnknowStatus (code 502)
+
+	caseOne = &TestCase{
+		Request: &SearchRequest{
+			Limit:  5,
+			Offset: 2,
+		},
+		Result: &SearchResponse{
+			Users:    []User{},
+			NextPage: false,
+		},
+		IsError: true,
+	}
+
+	ts = httptest.NewServer(http.HandlerFunc(SearchServerErrorUnknowStatus))
+
+	c = &SearchClient{
+		AccessToken: "",
+		URL:         ts.URL,
+	}
+
+	_, err = c.FindUsers(*caseOne.Request)
+
+	if !(err != nil) && caseOne.IsError {
+		t.Errorf("Error SearchServerErrorUnknowStatus with bad gateway status code (502)")
+	}
+
+	ts = httptest.NewServer(http.HandlerFunc(SearchServerErrorUnknowStatus))
+
+	c = &SearchClient{
+		AccessToken: "",
+		URL:         ts.URL,
+	}
+
+	_, err = c.FindUsers(*caseOne.Request)
+
+	if !(err != nil) && caseOne.IsError {
+		t.Errorf("Error SearchServerErrorUnknowStatus with bad gateway status code (502)")
+	}
+
+	// Timeout
+
+	ts = httptest.NewServer(http.HandlerFunc(SearchServerErrorTimeout))
+
+	c = &SearchClient{
+		AccessToken: "",
+		URL:         ts.URL,
+	}
+
+	_, err = c.FindUsers(*caseOne.Request)
+	fmt.Println(err)
+	if !(err != nil) && caseOne.IsError {
+		t.Errorf("Error Timeout with request timeout status code (408)")
+	}
+
+	////unknow error
+
+	ts = &httptest.Server{}
+
+	c = &SearchClient{
+		AccessToken: "",
+		URL:         ts.URL,
+	}
+
+	_, err = c.FindUsers(*caseOne.Request)
+	if !(err != nil) && caseOne.IsError {
+		t.Errorf("Error Timeout with request timeout status code (408)")
+	}
 }
