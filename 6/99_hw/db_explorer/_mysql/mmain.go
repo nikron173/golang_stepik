@@ -15,11 +15,6 @@ type ApplicationError struct {
 	ErrorMessage string
 }
 
-type Param struct {
-	Limit  int
-	Offset int
-}
-
 func (e ApplicationError) Error() string {
 	return fmt.Sprintf("error: %s", e.ErrorMessage)
 }
@@ -65,10 +60,11 @@ func Routes(db *sql.DB) (*Router, error) {
 	return routes, nil
 }
 
-func (d *Data) Get(db *sql.DB, table string, id string) (*Data, error) {
-	// q := fmt.Sprintf("SHOW FULL COLUMNS FROM ?", table)
-	// result, err := db.Query(q)
-	result, err := db.Query("SELECT * FROM ?", table)
+type Info interface{}
+
+func (h *Handler) GetObject(table string, id string) (*Data, error) {
+	q := fmt.Sprintf("SHOW FULL COLUMNS FROM `%s`", table)
+	result, err := h.DB.Query(q)
 	if err != nil {
 		fmt.Printf(err.Error())
 		return nil, ApplicationError{
@@ -77,20 +73,20 @@ func (d *Data) Get(db *sql.DB, table string, id string) (*Data, error) {
 		}
 	}
 
-	t := new(Table)
-	t.Name = table
-	fmt.Printf("%#v\n", t)
 	r, _ := result.Columns()
-	tt, _ := result.ColumnTypes()
-	fmt.Printf("Columns: %s\n", r)
-	fmt.Printf("Types columns: %s\n", tt)
 
+	tt, _ := result.ColumnTypes()
+	fmt.Printf("Columns: %s\n\n", r)
+	fmt.Printf("Types columns: %s\n\n", tt)
+
+	// kek := make([]interface{}, len(r))
+	kek := make([]Info, len(r))
 	for result.Next() {
-		info := new(InfoTable)
-		result.Scan(&info.Field, &info.Key, &info.Type, &info.NullField)
-		// fmt.Printf("%#v", info)
+
+		// result.Scan(&kek[0], &kek[1], &kek[2], &kek[3], &kek[4], &kek[5], &kek[6], &kek[7], &kek[8])
+		result.Scan(&kek)
 	}
-	fmt.Printf("%#v", t)
+	fmt.Printf("%#v", kek)
 	return nil, nil
 }
 
@@ -103,6 +99,9 @@ func main() {
 
 	fmt.Printf("Successfull connected database:\n %#v\n", db.Stats())
 
-	d := new(Data)
-	d.Get(db, "items", "1")
+	h := &Handler{
+		DB: db,
+	}
+
+	h.GetObject("items", "1")
 }
