@@ -13,6 +13,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/peer"
+	"google.golang.org/grpc/status"
 )
 
 // тут вы пишете код
@@ -40,7 +41,8 @@ func StartMyMicroservice(ctx context.Context, listenerAddr string, ACLData strin
 	}
 
 	server := grpc.NewServer(
-		grpc.UnaryInterceptor(adminService.CheckACL),
+		grpc.UnaryInterceptor(adminService.ACLUnary),
+		grpc.StreamInterceptor(adminService.ACLStream),
 	)
 
 	RegisterAdminServer(server, adminService)
@@ -77,13 +79,10 @@ type AdminService struct {
 	ACL map[string][]string
 }
 
-func (as *AdminService) CheckACL(ctx context.Context, req interface{}, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (interface{}, error) {
-	md, _ := metadata.FromIncomingContext(ctx)
-	p, _ := peer.FromContext(ctx)
-
+func (as *AdminService) CheckACL(md metadata.MD, methodCall string) (bool, string, error) {
 	consumerArr := md.Get("consumer")
 	if len(consumerArr) == 0 {
-		return nil, grpc.Errorf(codes.Unauthenticated, "Unauthenticated")
+		return false, "", grpc.Errorf(codes.Unauthenticated, "Unauthenticated")
 	}
 
 	consumer := consumerArr[0]
@@ -92,25 +91,42 @@ func (as *AdminService) CheckACL(ctx context.Context, req interface{}, info *grp
 
 	methods, ok := as.ACL[consumer]
 	if !ok {
-		return nil, grpc.Errorf(codes.Unauthenticated, "Unauthenticated")
+		return false, "", grpc.Errorf(codes.Unauthenticated, "Unauthenticated")
 	}
 
 	cont := false
 	for _, method := range methods {
-		if strings.EqualFold(method, info.FullMethod) {
+		fmt.Printf("Method \"%s\" and methodCall \"%s\"\n", method, methodCall)
+		if strings.EqualFold(method, methodCall) {
 			cont = true
 			break
 		}
-
 		sep := strings.Split(method, "/")
-		if len(sep) == 3 && sep[2] == "*" && strings.Split(info.FullMethod, "/")[1] == sep[1] {
+		if len(sep) == 3 && sep[2] == "*" && strings.Split(methodCall, "/")[1] == sep[1] {
 			cont = true
 			break
 		}
 	}
-
+	fmt.Printf("Consumer: %s\nCont: %v\n", consumer, cont)
 	if !cont {
-		return nil, grpc.Errorf(codes.Unauthenticated, "Unauthenticated")
+		return false, "", grpc.Errorf(codes.Unauthenticated, "Unauthenticated")
+	}
+
+	return true, consumer, nil
+}
+
+func (as *AdminService) ACLUnary(ctx context.Context, req interface{}, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (interface{}, error) {
+	md, _ := metadata.FromIncomingContext(ctx)
+	p, _ := peer.FromContext(ctx)
+
+	ok, consumer, err := as.CheckACL(md, info.FullMethod)
+
+	if err != nil {
+		return nil, err
+	}
+
+	if !ok {
+		return nil, status.Error(codes.Unauthenticated, "Unauthenticated")
 	}
 
 	as.mu.Lock()
@@ -122,53 +138,87 @@ func (as *AdminService) CheckACL(ctx context.Context, req interface{}, info *grp
 	as.Event.Timestamp = time.Now().Unix()
 	as.Event.Host = p.Addr.String()
 	as.mu.Unlock()
-	// fmt.Println(as.Stat)
-	// fmt.Println(as.Event)
+	fmt.Println("UnaryServer Stat: ", as.Stat)
+	fmt.Println("UnaryServer Event: ", as.Event)
 	reply, err := handler(ctx, req)
 
 	return reply, err
 }
 
-func (as *AdminService) CheckACLStream(ctx context.Context, methodCall string) error {
-	md, _ := metadata.FromIncomingContext(ctx)
-	consumerArr := md.Get("consumer")
-	if len(consumerArr) == 0 {
-		return grpc.Errorf(codes.Unauthenticated, "Unauthenticated")
+func (as *AdminService) ACLStream(srv interface{}, ss grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
+
+	md, _ := metadata.FromIncomingContext(ss.Context())
+	p, _ := peer.FromContext(ss.Context())
+
+	ok, consumer, err := as.CheckACL(md, info.FullMethod)
+
+	if err != nil {
+		return err
 	}
 
-	consumer := consumerArr[0]
-	// fmt.Printf("Consumer: %#v\n", consumer)
-	// fmt.Println(as.ACL)
-
-	methods, ok := as.ACL[consumer]
 	if !ok {
-		return grpc.Errorf(codes.Unauthenticated, "Unauthenticated")
+		return status.Error(codes.Unauthenticated, "Unauthenticated")
 	}
 
-	cont := false
-	for _, method := range methods {
-		if strings.EqualFold(method, methodCall) {
-			cont = true
-			break
-		}
-		sep := strings.Split(method, "/")
-		if len(sep) == 3 && sep[2] == "*" && methodCall == sep[1] {
-			cont = true
-			break
-		}
+	if err := handler(srv, ss); err != nil {
+		return err
 	}
 
-	if !cont {
-		return grpc.Errorf(codes.Unauthenticated, "Unauthenticated")
-	}
+	as.mu.Lock()
+	as.Stat.ByConsumer[consumer]++
+	as.Stat.ByMethod[info.FullMethod]++
+	as.Stat.Timestamp = time.Now().Unix()
+	as.Event.Consumer = consumer
+	as.Event.Method = info.FullMethod
+	as.Event.Timestamp = time.Now().Unix()
+	as.Event.Host = p.Addr.String()
+	as.mu.Unlock()
+	fmt.Println("UnaryServer Stat: ", as.Stat)
+	fmt.Println("UnaryServer Event: ", as.Event)
 
 	return nil
 }
 
+// func (as *AdminService) CheckACLStream(ctx context.Context, methodCall string) error {
+// 	md, _ := metadata.FromIncomingContext(ctx)
+// 	consumerArr := md.Get("consumer")
+// 	if len(consumerArr) == 0 {
+// 		return grpc.Errorf(codes.Unauthenticated, "Unauthenticated")
+// 	}
+
+// 	consumer := consumerArr[0]
+// 	// fmt.Printf("Consumer: %#v\n", consumer)
+// 	// fmt.Println(as.ACL)
+
+// 	methods, ok := as.ACL[consumer]
+// 	if !ok {
+// 		return grpc.Errorf(codes.Unauthenticated, "Unauthenticated")
+// 	}
+
+// 	cont := false
+// 	for _, method := range methods {
+// 		if strings.EqualFold(method, methodCall) {
+// 			cont = true
+// 			break
+// 		}
+// 		sep := strings.Split(method, "/")
+// 		if len(sep) == 3 && sep[2] == "*" && methodCall == sep[1] {
+// 			cont = true
+// 			break
+// 		}
+// 	}
+
+// 	if !cont {
+// 		return grpc.Errorf(codes.Unauthenticated, "Unauthenticated")
+// 	}
+
+// 	return nil
+// }
+
 func (as *AdminService) Logging(nothing *Nothing, in Admin_LoggingServer) error {
-	if err := as.CheckACLStream(in.Context(), Admin_Logging_FullMethodName); err != nil {
-		return err
-	}
+	// if err := as.CheckACLStream(in.Context(), Admin_Logging_FullMethodName); err != nil {
+	// 	return err
+	// }
 
 	go func() {
 		for {
@@ -193,9 +243,9 @@ func (as *AdminService) Logging(nothing *Nothing, in Admin_LoggingServer) error 
 }
 
 func (as *AdminService) Statistics(interval *StatInterval, in Admin_StatisticsServer) error {
-	if err := as.CheckACLStream(in.Context(), Admin_Statistics_FullMethodName); err != nil {
-		return err
-	}
+	// if err := as.CheckACLStream(in.Context(), Admin_Statistics_FullMethodName); err != nil {
+	// 	return err
+	// }
 	go func() {
 		tiker := time.NewTicker(time.Duration(interval.IntervalSeconds) * time.Second)
 		for _ = range tiker.C {
