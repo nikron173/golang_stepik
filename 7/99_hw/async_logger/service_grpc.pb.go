@@ -117,7 +117,7 @@ func (x *adminStatisticsClient) Recv() (*Stat, error) {
 type AdminServer interface {
 	Logging(*Nothing, Admin_LoggingServer) error
 	Statistics(*StatInterval, Admin_StatisticsServer) error
-	//mustEmbedUnimplementedAdminServer()
+	mustEmbedUnimplementedAdminServer()
 }
 
 // UnimplementedAdminServer must be embedded to have forward compatible implementations.
@@ -264,7 +264,7 @@ type BizServer interface {
 	Check(context.Context, *Nothing) (*Nothing, error)
 	Add(context.Context, *Nothing) (*Nothing, error)
 	Test(context.Context, *Nothing) (*Nothing, error)
-	//mustEmbedUnimplementedBizServer()
+	mustEmbedUnimplementedBizServer()
 }
 
 // UnimplementedBizServer must be embedded to have forward compatible implementations.

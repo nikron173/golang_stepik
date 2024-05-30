@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net"
 	"strings"
 	"sync"
@@ -20,14 +21,10 @@ import (
 // обращаю ваше внимание - в этом задании запрещены глобальные переменные
 func StartMyMicroservice(ctx context.Context, listenerAddr string, ACLData string) error {
 
-	stat := &Stat{
-		ByMethod:   make(map[string]uint64),
-		ByConsumer: make(map[string]uint64),
-	}
-
 	adminService := &AdminService{
-		mu:   sync.RWMutex{},
-		Stat: *stat,
+		mu:    sync.RWMutex{},
+		Logs:  sync.Map{},
+		Stats: sync.Map{},
 	}
 	bizService := new(BizService)
 
@@ -60,7 +57,7 @@ func StartMyMicroservice(ctx context.Context, listenerAddr string, ACLData strin
 			select {
 			case <-ctx.Done():
 				{
-					server.Stop()
+					server.GracefulStop()
 					listener.Close()
 					return ctx.Err()
 				}
@@ -73,10 +70,11 @@ func StartMyMicroservice(ctx context.Context, listenerAddr string, ACLData strin
 }
 
 type AdminService struct {
-	mu sync.RWMutex
-	Stat
-	Event
-	ACL map[string][]string
+	mu    sync.RWMutex
+	Logs  sync.Map
+	Stats sync.Map
+	ACL   map[string][]string
+	UnimplementedAdminServer
 }
 
 func (as *AdminService) CheckACL(md metadata.MD, methodCall string) (bool, string, error) {
@@ -86,9 +84,6 @@ func (as *AdminService) CheckACL(md metadata.MD, methodCall string) (bool, strin
 	}
 
 	consumer := consumerArr[0]
-	// fmt.Printf("Consumer: %#v\n", consumer)
-	// fmt.Println(as.ACL)
-
 	methods, ok := as.ACL[consumer]
 	if !ok {
 		return false, "", grpc.Errorf(codes.Unauthenticated, "Unauthenticated")
@@ -96,7 +91,6 @@ func (as *AdminService) CheckACL(md metadata.MD, methodCall string) (bool, strin
 
 	cont := false
 	for _, method := range methods {
-		fmt.Printf("Method \"%s\" and methodCall \"%s\"\n", method, methodCall)
 		if strings.EqualFold(method, methodCall) {
 			cont = true
 			break
@@ -107,7 +101,7 @@ func (as *AdminService) CheckACL(md metadata.MD, methodCall string) (bool, strin
 			break
 		}
 	}
-	fmt.Printf("Consumer: %s\nCont: %v\n", consumer, cont)
+
 	if !cont {
 		return false, "", grpc.Errorf(codes.Unauthenticated, "Unauthenticated")
 	}
@@ -129,17 +123,31 @@ func (as *AdminService) ACLUnary(ctx context.Context, req interface{}, info *grp
 		return nil, status.Error(codes.Unauthenticated, "Unauthenticated")
 	}
 
-	as.mu.Lock()
-	as.Stat.ByConsumer[consumer]++
-	as.Stat.ByMethod[info.FullMethod]++
-	as.Stat.Timestamp = time.Now().Unix()
-	as.Event.Consumer = consumer
-	as.Event.Method = info.FullMethod
-	as.Event.Timestamp = time.Now().Unix()
-	as.Event.Host = p.Addr.String()
-	as.mu.Unlock()
-	fmt.Println("UnaryServer Stat: ", as.Stat)
-	fmt.Println("UnaryServer Event: ", as.Event)
+	event := &Event{
+		Timestamp: time.Now().Unix(),
+		Method:    info.FullMethod,
+		Consumer:  consumer,
+		Host:      p.Addr.String(),
+	}
+
+	go func() {
+		as.Logs.Range(func(key, value interface{}) bool {
+			eventResp, _ := value.(EventResponce)
+			eventResp.Event <- *event
+			return true
+		})
+	}()
+
+	go func() {
+		as.Stats.Range(func(key, value interface{}) bool {
+			stat, _ := value.(Stat)
+			stat.Timestamp = time.Now().Unix()
+			stat.ByConsumer[consumer]++
+			stat.ByMethod[info.FullMethod]++
+			return true
+		})
+	}()
+
 	reply, err := handler(ctx, req)
 
 	return reply, err
@@ -160,109 +168,114 @@ func (as *AdminService) ACLStream(srv interface{}, ss grpc.ServerStream, info *g
 		return status.Error(codes.Unauthenticated, "Unauthenticated")
 	}
 
+	event := &Event{
+		Timestamp: time.Now().Unix(),
+		Method:    info.FullMethod,
+		Consumer:  consumer,
+		Host:      p.Addr.String(),
+	}
+
+	go func() {
+		as.Logs.Range(func(key, value interface{}) bool {
+			eventResp, _ := value.(EventResponce)
+			eventResp.Event <- *event
+			return true
+		})
+	}()
+
+	go func() {
+		as.Stats.Range(func(key, value interface{}) bool {
+			stat, _ := value.(Stat)
+			stat.Timestamp = time.Now().Unix()
+			stat.ByConsumer[consumer]++
+			stat.ByMethod[info.FullMethod]++
+			return true
+		})
+	}()
+
 	if err := handler(srv, ss); err != nil {
 		return err
 	}
 
-	as.mu.Lock()
-	as.Stat.ByConsumer[consumer]++
-	as.Stat.ByMethod[info.FullMethod]++
-	as.Stat.Timestamp = time.Now().Unix()
-	as.Event.Consumer = consumer
-	as.Event.Method = info.FullMethod
-	as.Event.Timestamp = time.Now().Unix()
-	as.Event.Host = p.Addr.String()
-	as.mu.Unlock()
-	fmt.Println("UnaryServer Stat: ", as.Stat)
-	fmt.Println("UnaryServer Event: ", as.Event)
-
 	return nil
 }
 
-// func (as *AdminService) CheckACLStream(ctx context.Context, methodCall string) error {
-// 	md, _ := metadata.FromIncomingContext(ctx)
-// 	consumerArr := md.Get("consumer")
-// 	if len(consumerArr) == 0 {
-// 		return grpc.Errorf(codes.Unauthenticated, "Unauthenticated")
-// 	}
-
-// 	consumer := consumerArr[0]
-// 	// fmt.Printf("Consumer: %#v\n", consumer)
-// 	// fmt.Println(as.ACL)
-
-// 	methods, ok := as.ACL[consumer]
-// 	if !ok {
-// 		return grpc.Errorf(codes.Unauthenticated, "Unauthenticated")
-// 	}
-
-// 	cont := false
-// 	for _, method := range methods {
-// 		if strings.EqualFold(method, methodCall) {
-// 			cont = true
-// 			break
-// 		}
-// 		sep := strings.Split(method, "/")
-// 		if len(sep) == 3 && sep[2] == "*" && methodCall == sep[1] {
-// 			cont = true
-// 			break
-// 		}
-// 	}
-
-// 	if !cont {
-// 		return grpc.Errorf(codes.Unauthenticated, "Unauthenticated")
-// 	}
-
-// 	return nil
-// }
-
 func (as *AdminService) Logging(nothing *Nothing, in Admin_LoggingServer) error {
-	// if err := as.CheckACLStream(in.Context(), Admin_Logging_FullMethodName); err != nil {
-	// 	return err
-	// }
-
-	go func() {
-		for {
-			select {
-			case <-in.Context().Done():
-				return
-			default:
+	ctx := in.Context()
+	md, _ := metadata.FromIncomingContext(ctx)
+	consumer := md.Get("consumer")[0]
+	_, ok := as.Logs.Load(consumer)
+	if !ok {
+		as.Logs.Store(consumer, EventResponce{
+			Event: make(chan Event),
+		})
+	}
+	fin := make(chan bool)
+	eventAny, _ := as.Logs.Load(consumer)
+	eventResponce, _ := eventAny.(EventResponce)
+	eventResponce.Fin = fin
+	for {
+		select {
+		case <-ctx.Done():
+			log.Printf("Ctx done(): disconnected")
+			close(eventResponce.Event)
+			as.Logs.Delete(consumer)
+			return nil
+		case event := <-eventResponce.Event:
+			if err := in.Send(&event); err != nil {
+				log.Printf("Error: %s\n", err)
 				as.mu.Lock()
-				event := &Event{
-					Host:      as.Event.Host,
-					Method:    as.Event.Method,
-					Consumer:  as.Event.Consumer,
-					Timestamp: as.Event.Timestamp,
-				}
+				close(eventResponce.Event)
 				as.mu.Unlock()
-				fmt.Printf("Event: %#v\n", event)
-				in.Send(event)
+				as.Logs.Delete(consumer)
+
+				return err
 			}
+		default:
+
 		}
-	}()
+	}
 	return nil
 }
 
 func (as *AdminService) Statistics(interval *StatInterval, in Admin_StatisticsServer) error {
-	// if err := as.CheckACLStream(in.Context(), Admin_Statistics_FullMethodName); err != nil {
-	// 	return err
-	// }
-	go func() {
-		tiker := time.NewTicker(time.Duration(interval.IntervalSeconds) * time.Second)
-		for _ = range tiker.C {
-			select {
-			case <-in.Context().Done():
-				return
-			default:
-				as.mu.Lock()
-				in.Send(&as.Stat)
-				as.mu.Unlock()
+	tiker := time.NewTicker(time.Duration(interval.IntervalSeconds) * time.Second)
+	ctx := in.Context()
+	md, _ := metadata.FromIncomingContext(ctx)
+	consumer := md.Get("consumer")[0]
+	_, ok := as.Stats.Load(consumer)
+	if !ok {
+		as.Stats.Store(consumer, Stat{
+			ByMethod:   make(map[string]uint64),
+			ByConsumer: make(map[string]uint64),
+		})
+	}
+	// fin := make(chan bool)
+	statAny, _ := as.Stats.Load(consumer)
+	stat, _ := statAny.(Stat)
+
+	for {
+		select {
+		case <-ctx.Done():
+			log.Printf("Ctx done(): disconnected")
+			as.Stats.Delete(consumer)
+			tiker.Stop()
+			return nil
+		case <-tiker.C:
+			if err := in.Send(&stat); err != nil {
+				log.Printf("Error: %s\n", err)
+				as.Stats.Delete(consumer)
+				tiker.Stop()
+				return err
 			}
+		default:
+
 		}
-	}()
-	return nil
+	}
 }
 
 type BizService struct {
+	UnimplementedBizServer
 }
 
 func (bs *BizService) Check(context.Context, *Nothing) (*Nothing, error) {
@@ -276,8 +289,14 @@ func (bs *BizService) Add(context.Context, *Nothing) (*Nothing, error) {
 		Dummy: true,
 	}, nil
 }
+
 func (bs *BizService) Test(context.Context, *Nothing) (*Nothing, error) {
 	return &Nothing{
 		Dummy: true,
 	}, nil
+}
+
+type EventResponce struct {
+	Fin   chan bool
+	Event chan Event
 }
