@@ -23,6 +23,7 @@ func StartMyMicroservice(ctx context.Context, listenerAddr string, ACLData strin
 
 	adminService := &AdminService{
 		mu:    sync.RWMutex{},
+		wg:    sync.WaitGroup{},
 		Logs:  sync.Map{},
 		Stats: sync.Map{},
 	}
@@ -71,6 +72,7 @@ func StartMyMicroservice(ctx context.Context, listenerAddr string, ACLData strin
 
 type AdminService struct {
 	mu    sync.RWMutex
+	wg    sync.WaitGroup
 	Logs  sync.Map
 	Stats sync.Map
 	ACL   map[string][]string
@@ -130,7 +132,9 @@ func (as *AdminService) ACLUnary(ctx context.Context, req interface{}, info *grp
 		Host:      p.Addr.String(),
 	}
 
+	as.wg.Add(2)
 	go func() {
+		defer as.wg.Done()
 		as.Logs.Range(func(key, value interface{}) bool {
 			eventResp, _ := value.(EventResponce)
 			eventResp.Event <- *event
@@ -139,6 +143,7 @@ func (as *AdminService) ACLUnary(ctx context.Context, req interface{}, info *grp
 	}()
 
 	go func() {
+		defer as.wg.Done()
 		as.Stats.Range(func(key, value interface{}) bool {
 			stat, _ := value.(Stat)
 			stat.Timestamp = time.Now().Unix()
@@ -147,7 +152,7 @@ func (as *AdminService) ACLUnary(ctx context.Context, req interface{}, info *grp
 			return true
 		})
 	}()
-
+	as.wg.Wait()
 	reply, err := handler(ctx, req)
 
 	return reply, err
@@ -175,7 +180,10 @@ func (as *AdminService) ACLStream(srv interface{}, ss grpc.ServerStream, info *g
 		Host:      p.Addr.String(),
 	}
 
+	as.mu.Lock()
+	as.wg.Add(2)
 	go func() {
+		defer as.wg.Done()
 		as.Logs.Range(func(key, value interface{}) bool {
 			eventResp, _ := value.(EventResponce)
 			eventResp.Event <- *event
@@ -184,6 +192,7 @@ func (as *AdminService) ACLStream(srv interface{}, ss grpc.ServerStream, info *g
 	}()
 
 	go func() {
+		defer as.wg.Done()
 		as.Stats.Range(func(key, value interface{}) bool {
 			stat, _ := value.(Stat)
 			stat.Timestamp = time.Now().Unix()
@@ -192,7 +201,8 @@ func (as *AdminService) ACLStream(srv interface{}, ss grpc.ServerStream, info *g
 			return true
 		})
 	}()
-
+	as.wg.Wait()
+	as.mu.Unlock()
 	if err := handler(srv, ss); err != nil {
 		return err
 	}
@@ -204,45 +214,48 @@ func (as *AdminService) Logging(nothing *Nothing, in Admin_LoggingServer) error 
 	ctx := in.Context()
 	md, _ := metadata.FromIncomingContext(ctx)
 	consumer := md.Get("consumer")[0]
+
 	_, ok := as.Logs.Load(consumer)
 	if !ok {
 		as.Logs.Store(consumer, EventResponce{
 			Event: make(chan Event),
 		})
 	}
-	fin := make(chan bool)
+
 	eventAny, _ := as.Logs.Load(consumer)
 	eventResponce, _ := eventAny.(EventResponce)
-	eventResponce.Fin = fin
+
 	for {
 		select {
 		case <-ctx.Done():
-			log.Printf("Ctx done(): disconnected")
 			close(eventResponce.Event)
 			as.Logs.Delete(consumer)
 			return nil
 		case event := <-eventResponce.Event:
-			if err := in.Send(&event); err != nil {
+			as.mu.Lock()
+			err := in.Send(&event)
+			as.mu.Unlock()
+			if err != nil {
 				log.Printf("Error: %s\n", err)
 				as.mu.Lock()
 				close(eventResponce.Event)
-				as.mu.Unlock()
 				as.Logs.Delete(consumer)
-
+				as.mu.Unlock()
 				return err
 			}
 		default:
 
 		}
 	}
-	return nil
 }
 
 func (as *AdminService) Statistics(interval *StatInterval, in Admin_StatisticsServer) error {
 	tiker := time.NewTicker(time.Duration(interval.IntervalSeconds) * time.Second)
+
 	ctx := in.Context()
 	md, _ := metadata.FromIncomingContext(ctx)
 	consumer := md.Get("consumer")[0]
+
 	_, ok := as.Stats.Load(consumer)
 	if !ok {
 		as.Stats.Store(consumer, Stat{
@@ -250,19 +263,24 @@ func (as *AdminService) Statistics(interval *StatInterval, in Admin_StatisticsSe
 			ByConsumer: make(map[string]uint64),
 		})
 	}
-	// fin := make(chan bool)
-	statAny, _ := as.Stats.Load(consumer)
-	stat, _ := statAny.(Stat)
 
 	for {
 		select {
 		case <-ctx.Done():
-			log.Printf("Ctx done(): disconnected")
 			as.Stats.Delete(consumer)
 			tiker.Stop()
 			return nil
 		case <-tiker.C:
-			if err := in.Send(&stat); err != nil {
+			as.mu.Lock()
+			statAny, _ := as.Stats.Load(consumer)
+			stat, _ := statAny.(Stat)
+			as.Stats.Store(consumer, Stat{
+				ByMethod:   make(map[string]uint64),
+				ByConsumer: make(map[string]uint64),
+			})
+			err := in.Send(&stat)
+			as.mu.Unlock()
+			if err != nil {
 				log.Printf("Error: %s\n", err)
 				as.Stats.Delete(consumer)
 				tiker.Stop()
@@ -297,6 +315,5 @@ func (bs *BizService) Test(context.Context, *Nothing) (*Nothing, error) {
 }
 
 type EventResponce struct {
-	Fin   chan bool
 	Event chan Event
 }
