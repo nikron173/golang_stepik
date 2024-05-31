@@ -12,17 +12,35 @@ func i2s(data interface{}, out interface{}) error {
 	// typeOfS := s.Type()
 	kek, _ := data.(map[string]interface{})
 	for i := range s.NumField() {
-		// j := s.Field(i)
-		// fmt.Printf("%d: %s, %s, %v\n", i, s.Type().Field(i).Name, j.Type(), j.Interface())
-		fmt.Printf("%s: %v\n", s.Type().Field(i).Name, kek[s.Type().Field(i).Name])
+		// fmt.Printf("%s: %v\n", s.Type().Field(i).Name, kek[s.Type().Field(i).Name])
 		switch s.Type().Field(i).Type.String() {
 		case reflect.Int.String():
-			val := (int64)(kek[s.Type().Field(i).Name].(float64))
-			s.Field(i).SetInt(val)
+			val, ok := kek[s.Type().Field(i).Name].(float64)
+			if !ok {
+				return fmt.Errorf("Error type")
+			}
+			s.Field(i).SetInt(int64(val))
+		case reflect.String.String():
+			val, ok := kek[s.Type().Field(i).Name].(string)
+			if !ok {
+				return fmt.Errorf("Error type")
+			}
+			s.Field(i).SetString(val)
+		case reflect.Float64.String():
+			val, ok := kek[s.Type().Field(i).Name].(float64)
+			if !ok {
+				return fmt.Errorf("Error type")
+			}
+			s.Field(i).SetFloat(float64(val))
+		case reflect.Bool.String():
+			val, ok := kek[s.Type().Field(i).Name].(bool)
+			if !ok {
+				return fmt.Errorf("Error type")
+			}
+			s.Field(i).SetBool(val)
 		}
-		// s.Field(i).Set(reflect.ValueOf(kek[s.Type().Field(i).Name]))
 	}
-	fmt.Println(out)
+	// fmt.Println(out)
 
 	return nil
 }
@@ -44,4 +62,5 @@ func main() {
 	json.Unmarshal(jsonRaw, &tmpData)
 
 	i2s(tmpData, new(Simple))
+	fmt.Println(tmpData)
 }
