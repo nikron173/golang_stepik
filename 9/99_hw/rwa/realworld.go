@@ -3,17 +3,23 @@ package main
 import (
 	"net/http"
 	"rwa/internal/handlers"
+	"rwa/internal/handlers/middleware"
+	"rwa/internal/service"
 )
 
 // сюда писать код
 
 func GetApp() http.Handler {
 
-	userHandler := handlers.NewUserHandler()
-	mux := http.NewServeMux()
-	mux.HandleFunc("/api/users", userHandler.Add)
-	mux.Handle("/api/users/login", userHandler)
-	mux.HandleFunc("/api/user", userHandler.Get)
+	sm := service.NewSessionService()
+	userHandler := handlers.NewUserHandler(sm)
 
-	return nil
+	mux := http.NewServeMux()
+	mux.Handle("/api/users", userHandler)
+	mux.Handle("/api/users/login", userHandler)
+	mux.Handle("/api/user", userHandler)
+
+	auth := middleware.AuthMiddleware(sm, mux)
+
+	return auth
 }
