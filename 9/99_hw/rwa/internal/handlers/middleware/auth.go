@@ -25,6 +25,7 @@ type SessionManager interface {
 
 func GetSessionFromContext(cxt context.Context) (*models.Session, error) {
 	session, ok := cxt.Value(sessionID).(*models.Session)
+	log.Printf("Middleware: GetSessionFromContext: session: %#v\n", session)
 	if !ok {
 		return nil, fmt.Errorf("No auth")
 	}
@@ -39,18 +40,15 @@ func AuthMiddleware(sm SessionManager, next http.Handler) http.Handler {
 		}
 		w.Header().Set("Content-Type", "application/json")
 
-		if _, ok := publicUrlPath[r.URL.Path]; ok {
-			next.ServeHTTP(w, r)
-			return
-		}
-
 		session, err := sm.Check(r)
 		log.Printf("Middleware: session: %#v, err: %s\n", session, err)
-		if err != nil {
+		if _, ok := publicUrlPath[r.URL.Path]; ok && err != nil {
+			next.ServeHTTP(w, r)
+		} else if err == nil {
+			ctx := context.WithValue(r.Context(), sessionID, session)
+			next.ServeHTTP(w, r.WithContext(ctx))
+		} else {
 			w.WriteHeader(http.StatusUnauthorized)
-			return
 		}
-		ctx := context.WithValue(r.Context(), sessionID, session)
-		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }

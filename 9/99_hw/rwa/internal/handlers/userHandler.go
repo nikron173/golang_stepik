@@ -14,9 +14,10 @@ import (
 
 type Storage interface {
 	Add(*models.User) (*models.User, error)
-	Get(uint) (*models.User, error)
+	Get(string) (*models.User, error)
 	GetByPasswordAndEmail(password string, email string) (*models.User, bool)
-	Delete(uint) bool
+	Delete(string) bool
+	Update(string, *models.User) (*models.User, error)
 }
 
 type UserHandler struct {
@@ -38,16 +39,53 @@ func (uh *UserHandler) Add(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
-	user := &models.User{}
-	json.Unmarshal(body, user)
-	uh.storage.Add(user)
-	userJson, err := json.Marshal(user)
+
+	mapUser := make(map[string]*models.User)
+	json.Unmarshal(body, &mapUser)
+	user, ok := mapUser["user"]
+
+	if !ok {
+		w.WriteHeader(http.StatusBadGateway)
+		return
+	}
+
+	userDB, err := uh.storage.Add(user)
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
-	w.WriteHeader(http.StatusOK)
-	w.Write(userJson)
+
+	log.Printf("UserHandler: Add: %#v\n", userDB)
+
+	session, err := uh.sm.Create(userDB.ID)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+	cokkie := http.Cookie{
+		Name:    "Authorization",
+		Value:   session.ID,
+		Expires: time.Now().Add(time.Hour * 24),
+	}
+
+	http.SetCookie(w, &cokkie)
+
+	resp := make(map[string]*models.User)
+	resp["User"] = &models.User{
+		Username: userDB.Username,
+		Email:    userDB.Email,
+		Token:    session.ID,
+	}
+	respJson, err := json.Marshal(resp)
+
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	// log.Printf("UserHandler: Add: %#v\n", string(respJson))
+	w.WriteHeader(http.StatusCreated)
+	w.Write(respJson)
 }
 
 func (uh *UserHandler) Get(w http.ResponseWriter, r *http.Request) {
@@ -63,14 +101,22 @@ func (uh *UserHandler) Get(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	userJson, err := json.Marshal(user)
+	resp := make(map[string]*models.User)
+	resp["User"] = &models.User{
+		Username: user.Username,
+		Email:    user.Email,
+		BIO:      user.BIO,
+	}
+
+	respJson, err := json.Marshal(resp)
+
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
 
 	w.WriteHeader(http.StatusOK)
-	w.Write(userJson)
+	w.Write(respJson)
 }
 
 func (uh *UserHandler) Login(w http.ResponseWriter, r *http.Request) {
@@ -81,7 +127,15 @@ func (uh *UserHandler) Login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	user := &models.User{}
+	mapUser := make(map[string]*models.User)
+	json.Unmarshal(body, &mapUser)
+	user, ok := mapUser["user"]
+
+	if !ok {
+		w.WriteHeader(http.StatusBadGateway)
+		return
+	}
+
 	err = json.Unmarshal(body, user)
 	if err != nil {
 		w.WriteHeader(http.StatusBadRequest)
@@ -107,29 +161,87 @@ func (uh *UserHandler) Login(w http.ResponseWriter, r *http.Request) {
 
 	http.SetCookie(w, &cokkie)
 
-	userJson, err := json.Marshal(user)
+	resp := make(map[string]*models.User)
+	resp["User"] = &models.User{
+		Username: userDB.Username,
+		Email:    userDB.Email,
+		Token:    session.ID,
+	}
+
+	respJson, err := json.Marshal(resp)
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
 	w.WriteHeader(http.StatusOK)
-	w.Write(userJson)
+	w.Write(respJson)
 }
 
 func (uh *UserHandler) Logout(w http.ResponseWriter, r *http.Request) {
-	session, err := r.Cookie("Authorization")
-	if err == http.ErrNoCookie {
-		w.WriteHeader(http.StatusOK)
+	session, err := middleware.GetSessionFromContext(r.Context())
+	log.Printf("UserHandler: Get: session: %#v\n", session)
+	if err != nil {
+		w.WriteHeader(http.StatusUnauthorized)
 		return
 	}
-	uh.sm.Delete(session.Value)
-	session.Expires = time.Now().AddDate(0, 0, -1)
-	http.SetCookie(w, session)
+
+	uh.sm.Delete(session.ID)
 	w.WriteHeader(http.StatusOK)
 }
 
-func (uh *UserHandler) Modify(w http.ResponseWriter, r *http.Request) {
+func (uh *UserHandler) Update(w http.ResponseWriter, r *http.Request) {
+	session, err := middleware.GetSessionFromContext(r.Context())
+	log.Printf("UserHandler: Get: session: %#v\n", session)
+	if err != nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		return
+	}
 
+	body, err := io.ReadAll(r.Body)
+	defer r.Body.Close()
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+
+	mapUser := make(map[string]*models.User)
+	json.Unmarshal(body, &mapUser)
+	user, ok := mapUser["user"]
+	if !ok {
+		w.WriteHeader(http.StatusBadGateway)
+		return
+	}
+
+	userDB, err := uh.storage.Update(session.UserID, user)
+
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	uh.sm.Delete(session.ID)
+	sessionNew, err := uh.sm.Create(userDB.ID)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	resp := make(map[string]*models.User)
+	resp["User"] = &models.User{
+		Username: userDB.Username,
+		Email:    userDB.Email,
+		BIO:      userDB.BIO,
+		Token:    sessionNew.ID,
+	}
+
+	respJson, err := json.Marshal(resp)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+	log.Printf("UserHandler: Update: respJson: %#v\n", string(respJson))
+	w.WriteHeader(http.StatusOK)
+	w.Write(respJson)
 }
 
 func (uh *UserHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -158,7 +270,7 @@ func (uh *UserHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			case http.MethodGet:
 				uh.Get(w, r)
 			case http.MethodPut:
-				uh.Modify(w, r)
+				uh.Update(w, r)
 			default:
 				w.WriteHeader(http.StatusMethodNotAllowed)
 			}

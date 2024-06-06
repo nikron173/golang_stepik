@@ -2,7 +2,7 @@ package repositories
 
 import (
 	"log"
-	"math/rand"
+	"rwa/internal/common"
 	"rwa/internal/models"
 	"sync"
 )
@@ -19,10 +19,10 @@ func NewSessionRepository() *SessionRepository {
 	}
 }
 
-func (sr *SessionRepository) Create(userID uint) *models.Session {
+func (sr *SessionRepository) Create(userID string) *models.Session {
 	sr.mu.Lock()
 	defer sr.mu.Unlock()
-	sessionID := randStringRunes(16)
+	sessionID := common.RandStringRunes(16)
 	session := &models.Session{
 		ID:     sessionID,
 		UserID: userID,
@@ -35,7 +35,7 @@ func (sr *SessionRepository) Create(userID uint) *models.Session {
 func (sr *SessionRepository) Check(token string) (*models.Session, bool) {
 	sr.mu.RLock()
 	defer sr.mu.RUnlock()
-	log.Printf("UserRepository: Map sessions: %#v\n", sr.sessions)
+	log.Printf("SessionRepository: Map sessions: %#v\n", sr.sessions)
 	session, ok := sr.sessions[token]
 	return session, ok
 }
@@ -49,7 +49,7 @@ func (sr *SessionRepository) Delete(token string) bool {
 	return before > after
 }
 
-func (sr *SessionRepository) DeleteAll(userID uint) {
+func (sr *SessionRepository) DeleteAll(userID string) {
 	sr.mu.Lock()
 	defer sr.mu.Unlock()
 	sliceSessionDelete := make([]string, 0)
@@ -61,13 +61,4 @@ func (sr *SessionRepository) DeleteAll(userID uint) {
 	for _, sessionID := range sliceSessionDelete {
 		delete(sr.sessions, sessionID)
 	}
-}
-
-func randStringRunes(n int) string {
-	letterRunes := []rune("abcdefghijklmnopqrstuvwxyz")
-	b := make([]rune, n)
-	for i := range b {
-		b[i] = letterRunes[rand.Intn(len(letterRunes))]
-	}
-	return string(b)
 }
