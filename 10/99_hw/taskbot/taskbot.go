@@ -3,8 +3,14 @@ package main
 import (
 	"context"
 	"log"
+	"taskbot/internal/delivery"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api"
+)
+
+var (
+	BotToken   string = "XXX"
+	WebhookURL string = "XXX"
 )
 
 func startTaskBot(ctx context.Context, httpListenAddr string) error {
@@ -15,6 +21,13 @@ func startTaskBot(ctx context.Context, httpListenAddr string) error {
 		инициализируете ваше приложение
 		и потом будете обрабатывать входящие сообщения
 	*/
+	tgBot := delivery.NewDeliveryTelegram(httpListenAddr, BotToken, WebhookURL)
+	log.Printf("Created tgBot: %#v\n", tgBot)
+	if err := tgBot.StartDeliveryTelegram(ctx); err != nil {
+		log.Printf("Error started tgBot: %s\n", err)
+		return err
+	}
+
 	return nil
 }
 
@@ -25,7 +38,7 @@ func main() {
 	}
 }
 
-//  это заглушка чтобы импорт сохранился
+// это заглушка чтобы импорт сохранился
 func __dummy() {
 	tgbotapi.APIEndpoint = "_dummy"
 }
